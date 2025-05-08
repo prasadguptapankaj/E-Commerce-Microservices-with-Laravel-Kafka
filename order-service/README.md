@@ -1,61 +1,191 @@
-<p align="center"><a href="https://laravel.com" target="_blank"><img src="https://raw.githubusercontent.com/laravel/art/master/logo-lockup/5%20SVG/2%20CMYK/1%20Full%20Color/laravel-logolockup-cmyk-red.svg" width="400" alt="Laravel Logo"></a></p>
+🛒 E-Commerce Microservices with Laravel & Kafka
+This project demonstrates a microservices-based architecture for an e-commerce system using Laravel and Apache Kafka for asynchronous, event-driven communication between services.
 
-<p align="center">
-<a href="https://github.com/laravel/framework/actions"><img src="https://github.com/laravel/framework/workflows/tests/badge.svg" alt="Build Status"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/dt/laravel/framework" alt="Total Downloads"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/v/laravel/framework" alt="Latest Stable Version"></a>
-<a href="https://packagist.org/packages/laravel/framework"><img src="https://img.shields.io/packagist/l/laravel/framework" alt="License"></a>
-</p>
+📦 Microservices Involved
+Order Service (Producer & Consumer)
 
-## About Laravel
+Inventory Service (Consumer & Producer)
 
-Laravel is a web application framework with expressive, elegant syntax. We believe development must be an enjoyable and creative experience to be truly fulfilling. Laravel takes the pain out of development by easing common tasks used in many web projects, such as:
+Payment Service (Consumer & Producer)
 
-- [Simple, fast routing engine](https://laravel.com/docs/routing).
-- [Powerful dependency injection container](https://laravel.com/docs/container).
-- Multiple back-ends for [session](https://laravel.com/docs/session) and [cache](https://laravel.com/docs/cache) storage.
-- Expressive, intuitive [database ORM](https://laravel.com/docs/eloquent).
-- Database agnostic [schema migrations](https://laravel.com/docs/migrations).
-- [Robust background job processing](https://laravel.com/docs/queues).
-- [Real-time event broadcasting](https://laravel.com/docs/broadcasting).
+Shipping Service (Consumer & Producer)
 
-Laravel is accessible, powerful, and provides tools required for large, robust applications.
+Notification Service (Global Consumer)
 
-## Learning Laravel
+🧩 Workflow Overview
+1. User Places Order
+css
+Copy
+Edit
+User → Order Service: placeOrder(product_id, quantity, user_id)
+Order is created in DB with status = pending.
 
-Laravel has the most extensive and thorough [documentation](https://laravel.com/docs) and video tutorial library of all modern web application frameworks, making it a breeze to get started with the framework.
+Order Service publishes event:
 
-You may also try the [Laravel Bootcamp](https://bootcamp.laravel.com), where you will be guided through building a modern Laravel application from scratch.
+json
+Copy
+Edit
+topic: order.placed
+payload: { "order_id", "product_id", "quantity", "user_id" }
+2. Inventory Service Handles Stock Reservation
+Listens to: order.placed
 
-If you don't feel like reading, [Laracasts](https://laracasts.com) can help. Laracasts contains thousands of video tutorials on a range of topics including Laravel, modern PHP, unit testing, and JavaScript. Boost your skills by digging into our comprehensive video library.
+Locks product row using SELECT ... FOR UPDATE.
 
-## Laravel Sponsors
+Checks if stock >= quantity.
 
-We would like to extend our thanks to the following sponsors for funding Laravel development. If you are interested in becoming a sponsor, please visit the [Laravel Partners program](https://partners.laravel.com).
+✅ If Stock Available:
 
-### Premium Partners
+Publishes inventory.reserved event:
 
-- **[Vehikl](https://vehikl.com/)**
-- **[Tighten Co.](https://tighten.co)**
-- **[Kirschbaum Development Group](https://kirschbaumdevelopment.com)**
-- **[64 Robots](https://64robots.com)**
-- **[Curotec](https://www.curotec.com/services/technologies/laravel/)**
-- **[DevSquad](https://devsquad.com/hire-laravel-developers)**
-- **[Redberry](https://redberry.international/laravel-development/)**
-- **[Active Logic](https://activelogic.com)**
+json
+Copy
+Edit
+topic: inventory.reserved
+payload: { "order_id", "product_id", "quantity" }
+❌ If Out of Stock:
 
-## Contributing
+Publishes inventory.failed event:
 
-Thank you for considering contributing to the Laravel framework! The contribution guide can be found in the [Laravel documentation](https://laravel.com/docs/contributions).
+json
+Copy
+Edit
+topic: inventory.failed
+payload: { "order_id", "product_id", "quantity" }
+3. Order Service Handles Inventory Response
+Listens to: inventory.reserved / inventory.failed
 
-## Code of Conduct
+On inventory.reserved:
 
-In order to ensure that the Laravel community is welcoming to all, please review and abide by the [Code of Conduct](https://laravel.com/docs/contributions#code-of-conduct).
+Updates order status to inventory_reserved.
 
-## Security Vulnerabilities
+Publishes:
 
-If you discover a security vulnerability within Laravel, please send an e-mail to Taylor Otwell via [taylor@laravel.com](mailto:taylor@laravel.com). All security vulnerabilities will be promptly addressed.
+json
+Copy
+Edit
+topic: payment.initiated
+payload: { "order_id", "amount", "user_id" }
+On inventory.failed:
 
-## License
+Updates order status to cancelled.
 
-The Laravel framework is open-sourced software licensed under the [MIT license](https://opensource.org/licenses/MIT).
+Publishes:
+
+json
+Copy
+Edit
+topic: notification.send
+payload: { "order_id", "message": "Order cancelled due to insufficient stock." }
+4. Payment Service Initiates Charge
+Listens to: payment.initiated
+
+Attempts charge via payment gateway.
+
+✅ If Successful:
+
+json
+Copy
+Edit
+topic: payment.success
+payload: { "order_id", "txn_id", "amount" }
+❌ If Failed:
+
+json
+Copy
+Edit
+topic: payment.failed
+payload: { "order_id" }
+5. Order Service Handles Payment Response
+Listens to: payment.success / payment.failed
+
+On payment.success:
+
+Updates order status to paid.
+
+Publishes:
+
+json
+Copy
+Edit
+topic: order.shipped
+payload: { "order_id", "user_id" }
+On payment.failed:
+
+Updates order status to payment_failed.
+
+Publishes:
+
+json
+Copy
+Edit
+topic: notification.send
+payload: { "order_id", "message": "Payment failed." }
+6. Shipping Service Ships the Order
+Listens to: order.shipped
+
+Assigns tracking number.
+
+Publishes:
+
+json
+Copy
+Edit
+topic: order.tracking.updated
+payload: { "order_id", "tracking_id" }
+7. Notification Service Sends Updates
+Listens to: All relevant topics
+
+Sends appropriate emails/SMS/push notifications for:
+
+Order placed
+
+Inventory reserved or failed
+
+Payment success or failure
+
+Order shipped
+
+Tracking updates
+
+🧰 Technologies Used
+Laravel (Microservice implementation)
+
+Apache Kafka (Event streaming and communication)
+
+MySQL/PostgreSQL (Service-specific databases)
+
+Docker (Optional) for local development and Kafka setup
+
+🚀 Setup & Run
+Clone the repositories of individual services.
+
+Ensure Kafka is running locally or remotely.
+
+Set Kafka configurations (KAFKA_BROKER, topics) in each service .env.
+
+Run Laravel queues and Kafka consumers for each service:
+
+bash
+Copy
+Edit
+php artisan queue:work
+php artisan kafka:consume
+📬 Kafka Topics Summary
+Topic	Producer	Consumer(s)
+order.placed	Order Service	Inventory Service
+inventory.reserved	Inventory Service	Order Service
+inventory.failed	Inventory Service	Order Service
+payment.initiated	Order Service	Payment Service
+payment.success	Payment Service	Order Service
+payment.failed	Payment Service	Order Service
+order.shipped	Order Service	Shipping Service
+order.tracking.updated	Shipping Service	Notification Service
+notification.send	Order/Payment	Notification Service
+
+🧪 Testing
+Simulate user actions using Postman or frontend UI.
+
+Monitor logs for Kafka message flow.
+
+Test resilience by bringing down a service and checking reprocessing behavior.
